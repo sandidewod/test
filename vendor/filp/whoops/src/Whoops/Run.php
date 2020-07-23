@@ -29,7 +29,7 @@ final class Run implements RunInterface
     /**
      * @var HandlerInterface[]
      */
-    private $handlerStack = [];
+    private $handlerQueue = [];
 
     private $silencedPatterns = [];
 
@@ -41,80 +41,105 @@ final class Run implements RunInterface
     }
 
     /**
-     * Explicitly request your handler runs as the last of all currently registered handlers
+     * Prepends a handler to the start of the queue
+     *
+     * @throws InvalidArgumentException  If argument is not callable or instance of HandlerInterface
+     * @param  Callable|HandlerInterface $handler
+     * @return Run
+     * @deprecated use appendHandler and prependHandler instead
      */
-    public function appendHandler($handler)
+    public function pushHandler($handler)
     {
-        array_unshift($this->handlerStack, $this->resolveHandler($handler));
-        return $this;
+        return $this->prependHandler($handler);
     }
 
     /**
-     * Explicitly request your handler runs as the first of all currently registered handlers
-     */
-    public function prependHandler($handler)
-    {
-        return $this->pushHandler($handler);
-    }
-
-    /**
-     * Register your handler as the last of all currently registered handlers.
-     * Prefer using appendHandler and prependHandler for clarity.
+     * Appends a handler to the end of the queue
      *
      * @throws InvalidArgumentException  If argument is not callable or instance of HandlerInterface
      * @param  Callable|HandlerInterface $handler
      * @return Run
      */
-    public function pushHandler($handler)
+    public function appendHandler($handler)
     {
-        $this->handlerStack[] = $this->resolveHandler($handler);
+        array_push($this->handlerQueue, $this->resolveHandler($handler));
         return $this;
     }
 
     /**
-     * See removeFirstHandler and removeLastHandler
+     * Prepends a handler to the start of the queue
+     *
+     * @throws InvalidArgumentException  If argument is not callable or instance of HandlerInterface
+     * @param  Callable|HandlerInterface $handler
+     * @return Run
+     */
+    public function prependHandler($handler)
+    {
+        array_unshift($this->handlerQueue, $this->resolveHandler($handler));
+        return $this;
+    }
+
+    /**
+     * Create a CallbackHandler from callable and throw if handler is invalid
+     *
+     * @throws InvalidArgumentException  If argument is not callable or instance of HandlerInterface
+     * @param Callable|HandlerInterface $handler
+     * @return HandlerInterface
+     */
+    private function resolveHandler($handler)
+    {
+        if (is_callable($handler)) {
+            $handler = new CallbackHandler($handler);
+        }
+
+        if (!$handler instanceof HandlerInterface) {
+            throw new InvalidArgumentException(
+                "Argument to " . __METHOD__ . " must be a callable, or instance of "
+                . "Whoops\\Handler\\HandlerInterface"
+            );
+        }
+
+        return $handler;
+    }
+
+    /**
+     * Removes the last handler in the queue and returns it.
+     * Returns null if there"s nothing else to pop.
      * @return null|HandlerInterface
      */
     public function popHandler()
     {
-        return array_pop($this->handlerStack);
-    }
-
-
-    /**
-     * Removes the first handler
-     */
-    public function removeFirstHandler()
-    {
-        array_pop($this->handlerStack);
+        return array_pop($this->handlerQueue);
     }
 
     /**
-     * Removes the last handler
+     * Removes the first handler in the queue and returns it.
+     * Returns null if there"s nothing else to shift.
+     * @return null|HandlerInterface
      */
-    public function removeLastHandler()
+    public function shiftHandler()
     {
-        array_shift($this->handlerStack);
+        return array_shift($this->handlerQueue);
     }
 
     /**
      * Returns an array with all handlers, in the
-     * order they were added to the stack.
+     * order they were added to the queue.
      * @return array
      */
     public function getHandlers()
     {
-        return $this->handlerStack;
+        return $this->handlerQueue;
     }
 
     /**
-     * Clears all handlers in the handlerStack, including
+     * Clears all handlers in the handlerQueue, including
      * the default PrettyPage handler.
      * @return Run
      */
     public function clearHandlers()
     {
-        $this->handlerStack = [];
+        $this->handlerQueue = [];
         return $this;
     }
 
@@ -283,34 +308,32 @@ final class Run implements RunInterface
         $handlerResponse = null;
         $handlerContentType = null;
 
-        try {
-            foreach (array_reverse($this->handlerStack) as $handler) {
-                $handler->setRun($this);
-                $handler->setInspector($inspector);
-                $handler->setException($exception);
+        foreach ($this->handlerQueue as $handler) {
+            $handler->setRun($this);
+            $handler->setInspector($inspector);
+            $handler->setException($exception);
 
-                // The HandlerInterface does not require an Exception passed to handle()
-                // and neither of our bundled handlers use it.
-                // However, 3rd party handlers may have already relied on this parameter,
-                // and removing it would be possibly breaking for users.
-                $handlerResponse = $handler->handle($exception);
+            // The HandlerInterface does not require an Exception passed to handle()
+            // and neither of our bundled handlers use it.
+            // However, 3rd party handlers may have already relied on this parameter,
+            // and removing it would be possibly breaking for users.
+            $handlerResponse = $handler->handle($exception);
 
-                // Collect the content type for possible sending in the headers.
-                $handlerContentType = method_exists($handler, 'contentType') ? $handler->contentType() : null;
+            // Collect the content type for possible sending in the headers.
+            $handlerContentType = method_exists($handler, 'contentType') ? $handler->contentType() : null;
 
-                if (in_array($handlerResponse, [Handler::LAST_HANDLER, Handler::QUIT])) {
-                    // The Handler has handled the exception in some way, and
-                    // wishes to quit execution (Handler::QUIT), or skip any
-                    // other handlers (Handler::LAST_HANDLER). If $this->allowQuit
-                    // is false, Handler::QUIT behaves like Handler::LAST_HANDLER
-                    break;
-                }
+            if (in_array($handlerResponse, [Handler::LAST_HANDLER, Handler::QUIT])) {
+                // The Handler has handled the exception in some way, and
+                // wishes to quit execution (Handler::QUIT), or skip any
+                // other handlers (Handler::LAST_HANDLER). If $this->allowQuit
+                // is false, Handler::QUIT behaves like Handler::LAST_HANDLER
+                break;
             }
-
-            $willQuit = $handlerResponse == Handler::QUIT && $this->allowQuit();
-        } finally {
-            $output = $this->system->cleanOutputBuffer();
         }
+
+        $willQuit = $handlerResponse == Handler::QUIT && $this->allowQuit();
+
+        $output = $this->system->cleanOutputBuffer();
 
         // If we're allowed to, send output generated by handlers directly
         // to the output, otherwise, and if the script doesn't quit, return
@@ -415,22 +438,6 @@ final class Run implements RunInterface
      * @var bool
      */
     private $canThrowExceptions = true;
-
-    private function resolveHandler($handler)
-    {
-        if (is_callable($handler)) {
-            $handler = new CallbackHandler($handler);
-        }
-
-        if (!$handler instanceof HandlerInterface) {
-            throw new InvalidArgumentException(
-                  "Handler must be a callable, or instance of "
-                . "Whoops\\Handler\\HandlerInterface"
-            );
-        }
-
-        return $handler;
-    }
 
     /**
      * Echo something to the browser
